@@ -39,7 +39,7 @@ with st.sidebar:
     max_depth = st.slider("Max depth", 3, 10, 5)
     learning_rate = st.slider("Learning rate", 0.01, 0.20, 0.035, 0.005)
     threshold = st.slider("Attack threshold", 0.10, 0.90, 0.50, 0.01)
-    train_btn = st.button("🚀 Train / Retrain Model", type="primary", use_container_width=True)
+    train_btn = st.button("🚀 Train / Retrain Model", type="primary", width="stretch")
 
 if train_btn:
     if train_file is None:
@@ -73,7 +73,7 @@ with tabs[0]:
                 c[3].metric("F1", f"{result['f1']*100:.2f}%")
                 c[4].metric("FPR", f"{result['fpr']*100:.2f}%")
                 st.caption(f"Threshold = {threshold:.2f}. Metrics are calculated from the uploaded unseen test set.")
-                st.dataframe(result["predictions"].head(200), use_container_width=True)
+                st.dataframe(result["predictions"].head(200), width="stretch")
             except Exception as e:
                 st.exception(e)
         else:
@@ -95,7 +95,7 @@ with tabs[1]:
             try:
                 exp = engine.explain(row)
                 st.session_state.last_exp = exp
-                st.dataframe(exp.head(20), use_container_width=True)
+                st.dataframe(exp.head(20), width="stretch")
                 st.bar_chart(exp.head(12).set_index("feature")["contribution"])
             except Exception as e:
                 st.exception(e)
@@ -123,7 +123,7 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("Human-in-the-Loop Analyst Validation")
     if "last_exp" in st.session_state:
-        st.dataframe(st.session_state.last_exp.head(12), use_container_width=True)
+        st.dataframe(st.session_state.last_exp.head(12), width="stretch")
     judgement = st.radio("Analyst judgement", ["Useful", "Unclear", "Incorrect"], horizontal=True)
     note = st.text_area("Audit note")
     if st.button("Save analyst feedback"):
@@ -134,7 +134,8 @@ with tabs[3]:
         })
         st.success("Feedback added to audit trail.")
     if st.session_state.feedback:
-        st.dataframe(pd.DataFrame(st.session_state.feedback), use_container_width=True)
+        st.dataframe(pd.DataFrame(st.session_state.feedback), width="stretch")
 
 st.divider()
 st.caption("XAI-IDS prototype: real-data detection, SHAP explanation, quality measurement and analyst validation. It is a detection/decision-support system, not an automatic attack-prevention system.")
+
