@@ -130,33 +130,291 @@ class XAIIDSPipeline:
                 .drop(columns="abs"))
 
     def quality(self, X):
+        # Evaluate explanation quality on one sample
+        if len(X) > 1:
+            X = X.iloc[[0]].copy()
+        else:
+            X = X.copy()
+
+        # 1. Explanation latency
         t0 = time.perf_counter()
-        exp = self.explain(X)
-        top = exp.head(min(10, len(exp)))
-        total = np.abs(exp["contribution"]).sum() + 1e-9
-        fidelity = float(np.clip(1 - np.abs(top["contribution"]).sum()/total, 0, 1))
-        
-        X2 = X.copy().astype(object)
-        for c in X2.select_dtypes(include=np.number).columns:
-            v = X2.iloc[0][c]
-            if pd.notna(v):
-                X2 = X2.astype(object)
-                X2.loc[X2.index[0], c] = v * 1.0001 if v != 0 else 1e-4
+        exp = self.explain(X).copy()
+        latency = (time.perf_counter() - t0) * 1000.0
+
+        if exp.empty:
+            return {
+                "fidelity": 0.0,
+                "stability": 0.0,
+                "comprehensiveness": 0.0,
+                "latency_ms": latency,
+                "overall": 0.0,
+                "quality_score": 0.0,
+            }
+
+        exp["abs_contribution"] = exp["contribution"].abs()
+        exp = exp.sort_values(
+            "abs_contribution",
+            ascending=False
+        )
+
+        top_k = min(10, len(exp))
+        top = exp.head(top_k)
+
+        # 2. Top-k SHAP fidelity
         try:
-            e2 = self.explain(X2).set_index("feature")
-            e1 = exp.set_index("feature")
-            common = e1.index.intersection(e2.index)
-            a, b = e1.loc[common,"contribution"].to_numpy(), e2.loc[common,"contribution"].to_numpy()
-            stability = float(np.clip(1-np.mean(np.abs(a-b))/(np.mean(np.abs(a))+1e-9),0,1))
+            _, actual_prob = self.predict(X, threshold=0.5)
+            actual_prob = float(actual_prob[0])
+
+            expected = np.asarray(
+                self.explainer.expected_value
+            ).reshape(-1)
+
+            base_value = float(expected[-1])
+
+            top_margin = (
+                base_value
+                + float(top["contribution"].sum())
+            )
+
+            top_margin = np.clip(top_margin, -50.0, 50.0)
+
+            top_prob = float(
+                1.0 / (1.0 + np.exp(-top_margin))
+            )
+
+            fidelity = float(
+                np.clip(
+                    1.0 - abs(actual_prob - top_prob),
+                    0.0,
+                    1.0
+                )
+            )
+
+        except Exception:
+            fidelity = 0.0
+
+        # 3. Stability under 1% numerical perturbation
+        try:
+            X2 = X.copy().astype(object)
+
+            for c in X.select_dtypes(
+                include=np.number
+            ).columns:
+                v = X.iloc[0][c]
+
+                if pd.notna(v):
+                    v = float(v)
+
+                    X2.loc[
+                        X2.index[0], c
+                    ] = v * 1.01 if v != 0 else 0.01
+
+            e2 = self.explain(X2).copy()
+
+            e1_map = exp.set_index(
+                "feature"
+            )["contribution"]
+
+            e2_map = e2.set_index(
+                "feature"
+            )["contribution"]
+
+            common = e1_map.index.intersection(
+                e2_map.index
+            )
+
+            if len(common) > 0:
+                a = e1_map.loc[common].to_numpy(
+                    dtype=float
+                )
+                b = e2_map.loc[common].to_numpy(
+                    dtype=float
+                )
+
+                norm_a = float(np.linalg.norm(a))
+                norm_b = float(np.linalg.norm(b))
+
+                if norm_a < 1e-12 and norm_b < 1e-12:
+                    cosine_similarity = 1.0
+                elif norm_a < 1e-12 or norm_b < 1e-12:
+                    cosine_similarity = 0.0
+                else:
+                    cosine_similarity = float(
+                        np.dot(a, b)
+                        / (norm_a * norm_b)
+                    )
+
+                cosine_similarity = float(
+                    np.clip(
+                        (cosine_similarity + 1.0) / 2.0,
+                        0.0,
+                        1.0
+                    )
+                )
+
+                k = min(10, len(common))
+
+                original_top = set(
+                    e1_map.loc[common]
+                    .abs()
+                    .sort_values(ascending=False)
+                    .head(k)
+                    .index
+                )
+
+                perturbed_top = set(
+                    e2_map.loc[common]
+                    .abs()
+                    .sort_values(ascending=False)
+                    .head(k)
+                    .index
+                )
+
+                rank_overlap = (
+                    len(
+                        original_top.intersection(
+                            perturbed_top
+                        )
+                    ) / max(1, k)
+                )
+
+                stability = float(
+                    np.clip(
+                        0.5 * cosine_similarity
+                        + 0.5 * rank_overlap,
+                        0.0,
+                        1.0
+                    )
+                )
+            else:
+                stability = 0.0
+
         except Exception:
             stability = 0.0
-        comprehensiveness = float(min(1, len(top)/max(1,len(exp))))
-        latency = (time.perf_counter()-t0)*1000
-        latency_component = 1/(1+latency/100)
-        score = 100*(0.35*fidelity+0.35*stability+0.20*comprehensiveness+0.10*latency_component)
-        return {"fidelity":fidelity,"stability":stability,
-                "comprehensiveness":comprehensiveness,
-                "latency_ms":latency,"quality_score":score}
+
+        # 4. Comprehensiveness
+        # Mask source features corresponding to top SHAP features
+        try:
+            preprocess = self.pipeline.named_steps["preprocess"]
+
+            numeric_cols = []
+            categorical_cols = []
+
+            for name, transformer, columns in preprocess.transformers_:
+                if name == "num":
+                    numeric_cols.extend(list(columns))
+                elif name == "cat":
+                    categorical_cols.extend(list(columns))
+
+            def source_feature(feature_name):
+                feature_name = str(feature_name)
+
+                if "__" not in feature_name:
+                    return feature_name
+
+                prefix, rest = feature_name.split(
+                    "__", 1
+                )
+
+                if prefix == "num":
+                    return rest
+
+                if prefix == "cat":
+                    for col in sorted(
+                        categorical_cols,
+                        key=len,
+                        reverse=True
+                    ):
+                        if (
+                            rest == col
+                            or rest.startswith(col + "_")
+                        ):
+                            return col
+
+                return rest
+
+            source_features = []
+
+            for feature in top["feature"].tolist():
+                source = source_feature(feature)
+
+                if source in X.columns:
+                    if source not in source_features:
+                        source_features.append(source)
+
+            if source_features:
+                X_mask = X.copy()
+
+                for c in source_features:
+                    X_mask[c] = X_mask[c].astype(object)
+                    X_mask.loc[
+                        X_mask.index[0], c
+                    ] = np.nan
+
+                base_pred, base_prob = self.predict(
+                    X,
+                    threshold=0.5
+                )
+
+                _, masked_prob = self.predict(
+                    X_mask,
+                    threshold=0.5
+                )
+
+                base_probability = float(base_prob[0])
+                masked_probability = float(masked_prob[0])
+
+                if int(base_pred[0]) == 1:
+                    base_confidence = base_probability
+                    masked_confidence = masked_probability
+                else:
+                    base_confidence = 1.0 - base_probability
+                    masked_confidence = 1.0 - masked_probability
+
+                confidence_drop = (
+                    base_confidence - masked_confidence
+                )
+
+                comprehensiveness = float(
+                    np.clip(
+                        confidence_drop,
+                        0.0,
+                        1.0
+                    )
+                )
+            else:
+                comprehensiveness = 0.0
+
+        except Exception:
+            comprehensiveness = 0.0
+
+        # 5. Latency score
+        latency_component = float(
+            np.exp(-latency / 100.0)
+        )
+
+        # 6. Overall explanation quality
+        overall = float(
+            np.clip(
+                0.35 * fidelity
+                + 0.35 * stability
+                + 0.20 * comprehensiveness
+                + 0.10 * latency_component,
+                0.0,
+                1.0
+            )
+        )
+
+        quality_score = overall * 100.0
+
+        return {
+            "fidelity": fidelity,
+            "stability": stability,
+            "comprehensiveness": comprehensiveness,
+            "latency_ms": latency,
+            "overall": overall,
+            "quality_score": quality_score,
+        }
 
     def save(self):
         if self.pipeline is not None:
@@ -179,6 +437,7 @@ class XAIIDSPipeline:
             "rows": 0 if self.X_train is None else len(self.X_train),
             "raw_features": 0 if self.X_train is None else self.X_train.shape[1]
         }
+
 
 
 
