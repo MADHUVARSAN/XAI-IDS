@@ -59,7 +59,7 @@ tabs = st.tabs(["🚨 Detection", "🔍 Explain", "📊 Quality", "👤 Analyst 
 
 with tabs[0]:
     st.subheader("Detection Posture")
-    if not engine.is_fitted:
+    if not engine.is_fitted or engine.X_train is None:
         st.info("Upload training data and train the model.")
     else:
         if test_file is not None:
@@ -82,8 +82,8 @@ with tabs[0]:
 
 with tabs[1]:
     st.subheader("SHAP Local Explanation")
-    if not engine.is_fitted:
-        st.info("Train the model first.")
+    if not engine.is_fitted or engine.X_train is None:
+        st.info("Upload the training CSV and train the model first.")
     else:
         idx = st.number_input("Training record index", 0, max(0, engine.X_train.shape[0]-1), 0)
         row = engine.X_train.iloc[[int(idx)]]
@@ -102,8 +102,8 @@ with tabs[1]:
 
 with tabs[2]:
     st.subheader("Explanation Quality")
-    if not engine.is_fitted:
-        st.info("Train the model first.")
+    if not engine.is_fitted or engine.X_train is None:
+        st.info("Upload the training CSV and train the model first.")
     else:
         idx = st.number_input("Quality record index", 0, max(0, engine.X_train.shape[0]-1), 0, key="quality_idx")
         row = engine.X_train.iloc[[int(idx)]]
@@ -138,4 +138,5 @@ with tabs[3]:
 
 st.divider()
 st.caption("XAI-IDS prototype: real-data detection, SHAP explanation, quality measurement and analyst validation. It is a detection/decision-support system, not an automatic attack-prevention system.")
+
 

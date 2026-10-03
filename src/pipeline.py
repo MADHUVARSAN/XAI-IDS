@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import time
 from pathlib import Path
 import joblib
@@ -25,6 +25,7 @@ class XAIIDSPipeline:
         self.feature_names_ = None
         self.explainer = None
         self.is_fitted = False
+        self.load()
 
     @staticmethod
     def _target(df):
@@ -135,11 +136,12 @@ class XAIIDSPipeline:
         total = np.abs(exp["contribution"]).sum() + 1e-9
         fidelity = float(np.clip(1 - np.abs(top["contribution"]).sum()/total, 0, 1))
         
-        X2 = X.copy()
+        X2 = X.copy().astype(object)
         for c in X2.select_dtypes(include=np.number).columns:
             v = X2.iloc[0][c]
             if pd.notna(v):
-                X2.loc[X2.index[0], c] = v*1.0001 if v != 0 else 1e-4
+                X2 = X2.astype(object)
+                X2.loc[X2.index[0], c] = v * 1.0001 if v != 0 else 1e-4
         try:
             e2 = self.explain(X2).set_index("feature")
             e1 = exp.set_index("feature")
@@ -177,5 +179,9 @@ class XAIIDSPipeline:
             "rows": 0 if self.X_train is None else len(self.X_train),
             "raw_features": 0 if self.X_train is None else self.X_train.shape[1]
         }
+
+
+
+
 
 
